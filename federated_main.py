@@ -67,16 +67,17 @@ def main():
     print(f"Starting Federated Learning on {device}...")
     global_model = get_model(INPUT_DIM).to(device)
     
-    banks = ['a', 'b', 'c']
+    train_banks = ['a', 'b']
+    test_bank = 'c'
     
     for r in range(ROUNDS):
         print(f"\n--- Round {r+1} ---")
         client_updates = []
         
-        for bank in banks:
+        for bank in train_banks:
             print(f"Training on Bank {bank.upper()}...")
-            #loader = get_dataloader(bank, batch_size=BATCH_SIZE)
-            loader = get_noisedataloader(bank, batch_size=BATCH_SIZE)
+            loader = get_dataloader(bank, batch_size=BATCH_SIZE)
+            #loader = get_noisedataloader(bank, batch_size=BATCH_SIZE)
             
             # Create a local copy of the global model
             local_model = get_model(INPUT_DIM).to(device)
@@ -91,8 +92,8 @@ def main():
 
         # 2. ADD THIS: Evaluate the new global model
         print(f"Evaluating Global Model on Bank C (Test Set)...")
-        #test_loader = get_dataloader('c', batch_size=BATCH_SIZE)
-        test_loader = get_noisedataloader('c', batch_size=BATCH_SIZE)
+        test_loader = get_dataloader(test_bank, batch_size=BATCH_SIZE)
+        #test_loader = get_noisedataloader(test_bank, batch_size=BATCH_SIZE)
         metrics_report = evaluate(global_model, test_loader)
         print(metrics_report)
 
