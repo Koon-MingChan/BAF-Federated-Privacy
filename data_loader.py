@@ -33,6 +33,7 @@ class BAFDataset(Dataset):
         # Basic Pre-processing: Convert categories to codes and scale numbers
         # This is critical for MLP models to converge
         X_numeric = X_raw.select_dtypes(include=['number']).fillna(0)
+        self.feature_names = list(X_numeric.columns)
         
         # Scaling is mandatory for Differential Privacy to work properly later
         scaler = StandardScaler()
