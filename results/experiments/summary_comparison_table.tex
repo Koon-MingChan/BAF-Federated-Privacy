@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Performance comparison of clean FL, uniform DP-FL, and FLSS-Dyn under validation-based checkpoint selection.}
+\label{tab:main_comparison}
+\begin{tabular}{lrrrrr}
+\toprule
+Method & Selected Round & AUC-PR & Precision & Recall & F1 & Best Threshold \\
+\midrule
+Clean FL + Early Stopping & 5 & 0.1313 & 0.0830 & 0.5591 & 0.1446 & 0.7000 \\
+Uniform DP + Early Stopping & 5 & 0.0609 & 0.0440 & 0.5594 & 0.0816 & 0.7000 \\
+FLSS-Dyn + Early Stopping & 2 & 0.0626 & 0.0499 & 0.4924 & 0.0906 & 0.7000 \\
+\bottomrule
+\end{tabular}
+\end{table}

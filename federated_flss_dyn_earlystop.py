@@ -6,6 +6,9 @@ import torch.nn as nn
 from models import get_model
 from data_loader import get_dataloader
 from sklearn.metrics import classification_report, average_precision_score, precision_recall_fscore_support
+from data_loader import get_dataloader, get_train_val_dataloaders
+import csv
+import os
 
 # Hyperparameters
 INPUT_DIM = 26
@@ -367,10 +370,28 @@ def evaluate(model, dataloader):
 
     return report, auc_pr, best_precision, best_recall, best_f1, best_threshold
 
+def save_round_metrics(csv_path, row):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+
+    file_exists = os.path.exists(csv_path)
+
+    with open(csv_path, mode="a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(row)
 
 def main():
-    print(f"Starting FLSS-Dyn DP-FL on {device}...")
+    print(f"Starting FLSS-Dyn DP-FL with validation-based early stopping on {device}...")
     print(f"CLIP_NORM={CLIP_NORM}, BASE_NOISE_MULTIPLIER={BASE_NOISE_MULTIPLIER}")
+
+    log_path = "results/experiments/flss_dyn_earlystop_round_metrics.csv"
+
+    # Clear old log for a fresh run
+    if os.path.exists(log_path):
+        os.remove(log_path)
 
     feature_to_cluster, base_cluster_noise, cluster_df = load_cluster_noise_scales()
     cluster_ema = initialize_cluster_ema(base_cluster_noise)
@@ -385,15 +406,35 @@ def main():
 
     global_model = get_model(INPUT_DIM).to(device)
 
-    train_banks = ["a", "b"]
-    test_bank = "c"
+    # Training / validation / testing split:
+    # Bank A: training
+    # Bank B: split into training + validation
+    # Bank C: final test only
+    bank_a_loader = get_dataloader("a", batch_size=BATCH_SIZE)
+    bank_b_train_loader, val_loader = get_train_val_dataloaders(
+        "b",
+        batch_size=BATCH_SIZE,
+        val_ratio=0.2,
+        seed=42
+    )
+    test_loader = get_dataloader("c", batch_size=BATCH_SIZE)
 
-    test_loader = get_dataloader(test_bank, batch_size=BATCH_SIZE)
+    train_loaders = [
+        ("a", bank_a_loader),
+        ("b_train", bank_b_train_loader),
+    ]
+
+    best_val_auc_pr = -1.0
+    best_state_dict = None
+    best_round = 0
 
     for r in range(ROUNDS):
         print(f"\n--- Round {r + 1}/{ROUNDS} ---")
 
-        dynamic_cluster_noise = compute_dynamic_cluster_noise(base_cluster_noise, cluster_ema)
+        dynamic_cluster_noise = compute_dynamic_cluster_noise(
+            base_cluster_noise,
+            cluster_ema
+        )
 
         print("\nDynamic cluster noise for this round:")
         for k, v in dynamic_cluster_noise.items():
@@ -402,10 +443,8 @@ def main():
         client_updates = []
         client_norms_list = []
 
-        for bank in train_banks:
-            print(f"Training on Bank {bank.upper()} with FLSS-Dyn gradients...")
-
-            train_loader = get_dataloader(bank, batch_size=BATCH_SIZE)
+        for bank_name, train_loader in train_loaders:
+            print(f"Training on Bank {bank_name.upper()} with FLSS-Dyn gradients...")
 
             local_model = get_model(INPUT_DIM).to(device)
             local_model.load_state_dict(copy.deepcopy(global_model.state_dict()))
@@ -422,6 +461,7 @@ def main():
             client_norms_list.append(client_norms)
 
         aggregate_weights(global_model, client_updates)
+
         round_avg_norms = average_cluster_norms(client_norms_list)
         cluster_ema = update_cluster_ema(cluster_ema, round_avg_norms)
 
@@ -431,18 +471,70 @@ def main():
 
         print(f"Global model updated for round {r + 1}")
 
-        print("Evaluating Global Model on Bank C...")
-        report, auc_pr, precision, recall, f1, best_threshold = evaluate(global_model, test_loader)
+        # Validation evaluation for checkpoint selection
+        print("Evaluating Global Model on Bank B validation set...")
+        val_report, val_auc_pr, val_precision, val_recall, val_f1, val_threshold = evaluate(
+            global_model,
+            val_loader
+        )
 
-        print(report)
-        print(f"AUC-PR: {auc_pr:.4f}")
-        print(f"Best Threshold: {best_threshold:.2f}")
-        print(f"Fraud Precision: {precision:.4f}")
-        print(f"Fraud Recall: {recall:.4f}")
-        print(f"Fraud F1: {f1:.4f}")
+        print(val_report)
+        print(f"Validation AUC-PR: {val_auc_pr:.4f}")
+        print(f"Validation Best Threshold: {val_threshold:.2f}")
+        print(f"Validation Fraud Precision: {val_precision:.4f}")
+        print(f"Validation Fraud Recall: {val_recall:.4f}")
+        print(f"Validation Fraud F1: {val_f1:.4f}")
 
-    torch.save(global_model.state_dict(), "global_baf_flss_dyn_model.pth")
-    print("\nFLSS-Dyn DP-FL training complete. Model saved.")
+        save_round_metrics(log_path, {
+            "phase": "validation",
+            "round": r + 1,
+            "auc_pr": val_auc_pr,
+            "best_threshold": val_threshold,
+            "fraud_precision": val_precision,
+            "fraud_recall": val_recall,
+            "fraud_f1": val_f1,
+            "best_val_auc_pr_so_far": max(best_val_auc_pr, val_auc_pr),
+        })
+
+        if val_auc_pr > best_val_auc_pr:
+            best_val_auc_pr = val_auc_pr
+            best_round = r + 1
+            best_state_dict = {
+                k: v.detach().cpu().clone()
+                for k, v in global_model.state_dict().items()
+            }
+            print(f"New best validation model found at round {best_round}")
+
+    # Final test evaluation using best validation checkpoint
+    print(f"\nLoading best validation model from round {best_round}")
+    global_model.load_state_dict(best_state_dict)
+
+    print("Final evaluation on Bank C test set...")
+    test_report, test_auc_pr, test_precision, test_recall, test_f1, test_threshold = evaluate(
+        global_model,
+        test_loader
+    )
+
+    print(test_report)
+    print(f"Test AUC-PR: {test_auc_pr:.4f}")
+    print(f"Test Best Threshold: {test_threshold:.2f}")
+    print(f"Test Fraud Precision: {test_precision:.4f}")
+    print(f"Test Fraud Recall: {test_recall:.4f}")
+    print(f"Test Fraud F1: {test_f1:.4f}")
+
+    save_round_metrics(log_path, {
+        "phase": "test",
+        "round": best_round,
+        "auc_pr": test_auc_pr,
+        "best_threshold": test_threshold,
+        "fraud_precision": test_precision,
+        "fraud_recall": test_recall,
+        "fraud_f1": test_f1,
+        "best_val_auc_pr_so_far": best_val_auc_pr,
+    })
+
+    torch.save(global_model.state_dict(), "global_baf_flss_dyn_earlystop_model.pth")
+    print("\nFLSS-Dyn DP-FL with validation-based early stopping complete. Model saved.")
 
 
 if __name__ == "__main__":

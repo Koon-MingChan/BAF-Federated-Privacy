@@ -4,6 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 import os
 import numpy as np
+from torch.utils.data import random_split
 
 # 1. This function splits the big CSV into "Bank" CSVs
 def split_data_into_banks(source_path='data/Base.csv'):
@@ -106,6 +107,30 @@ def get_noisedataloader(bank_name, batch_size=64, use_privacy=True):
         
     return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+def get_train_val_dataloaders(bank_name, batch_size=64, val_ratio=0.2, seed=42):
+    path = f"data/bank_{bank_name}.csv"
+    if not os.path.exists(path):
+        split_data_into_banks()
+
+    dataset = BAFDataset(path)
+
+    val_size = int(len(dataset) * val_ratio)
+    train_size = len(dataset) - val_size
+
+    generator = torch.Generator().manual_seed(seed)
+
+    train_dataset, val_dataset = random_split(
+        dataset,
+        [train_size, val_size],
+        generator=generator
+    )
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader
+
 if __name__ == "__main__":
     # Test the split
     split_data_into_banks()
+
